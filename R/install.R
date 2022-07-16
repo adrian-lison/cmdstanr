@@ -489,7 +489,7 @@ install_toolchain <- function(quiet = FALSE) {
     ),
     processx::run(
       "pacman",
-      args = c("-Sy", install_pkgs, "--noconfirm"),
+      args = c("-Syu", install_pkgs, "--noconfirm --force"),
       wd = rtools_usr_bin,
       error_on_status = TRUE,
       echo_cmd = is_verbose_mode(),
