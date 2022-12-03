@@ -71,6 +71,7 @@ articles:
     contents:
       - cmdstanr-internals
       - r-markdown
+      - deprecations
       - profiling
       - articles-online-only/opencl
 
@@ -101,12 +102,14 @@ reference:
       - CmdStanMLE
       - CmdStanVB
       - CmdStanGQ
+      - CmdStanDiagnose
       - starts_with("fit-method")
   - title: "Other tools for working with CmdStan"
     contents:
       - read_cmdstan_csv
       - write_stan_json
       - write_stan_file
+      - draws_to_csv
   - title: "Using CmdStanR with knitr and R Markdown"
     contents:
       - register_knitr_engine

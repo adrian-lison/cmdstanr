@@ -36,7 +36,7 @@ test_that("saving csv output files works", {
     expect_true(all(file.size(paths) > 0))
 
     should_match <- paste0("testing-output-",
-                           format(Sys.time(), "%Y%m%d%H%M"),
+                           base::format(Sys.time(), "%Y%m%d%H%M"),
                            "-",
                            seq_len(fit$num_procs()))
     for (j in seq_along(paths)) {
@@ -71,7 +71,7 @@ test_that("saving diagnostic csv output works", {
     expect_true(all(file.size(paths) > 0))
 
     should_match <- paste0("testing-output-diagnostic-",
-                           format(Sys.time(), "%Y%m%d%H%M"),
+                           base::format(Sys.time(), "%Y%m%d%H%M"),
                            "-",
                            seq_len(fit$num_procs()))
 
@@ -452,11 +452,8 @@ test_that("sampling with inits works with include_paths", {
     file.remove(exe)
   }
 
-  expect_interactive_message(
-    mod_w_include <- cmdstan_model(stan_file = stan_program_w_include, quiet = TRUE,
-                                   include_paths = test_path("resources", "stan")),
-    "Compiling Stan program"
-  )
+    mod_w_include <- cmdstan_model(stan_file = stan_program_w_include, quiet = FALSE,
+                                   include_paths = test_path("resources", "stan"))
 
   data_list <- list(N = 10, y = c(0,1,0,0,0,0,0,0,0,1))
 

@@ -41,8 +41,20 @@ os_is_windows <- function() {
   isTRUE(.Platform$OS.type == "windows")
 }
 
+os_is_wsl <- function() {
+  os_is_windows() && (isTRUE(.cmdstanr$WSL) || Sys.getenv("CMDSTANR_USE_WSL") == 1)
+}
+
 os_is_macos <- function() {
   isTRUE(Sys.info()[["sysname"]] == "Darwin")
+}
+
+is_rtools42_toolchain <- function() {
+  os_is_windows() && R.version$major == "4" && R.version$minor >= "2.0"
+}
+
+is_rtools40_toolchain <- function() {
+  os_is_windows() && R.version$major == "4" && R.version$minor < "2.0"
 }
 
 # Check if running R in Rosetta 2 translation environment, which is an
@@ -60,7 +72,7 @@ is_rosetta2 <- function() {
 
 # Returns the type of make command to use to compile depending on the OS
 make_cmd <- function() {
-  if (os_is_windows()) {
+  if (os_is_windows() && !os_is_wsl()) {
     "mingw32-make.exe"
   } else {
     "make"
@@ -69,13 +81,12 @@ make_cmd <- function() {
 
 # Returns the stanc exe path depending on the OS
 stanc_cmd <- function() {
-  if (os_is_windows()) {
+  if (os_is_windows() && !os_is_wsl()) {
     "bin/stanc.exe"
   } else {
     "bin/stanc"
   }
 }
-
 
 # paths and extensions ----------------------------------------------------
 
@@ -88,7 +99,8 @@ repair_path <- function(path) {
   }
   path <- path.expand(path)
   path <- gsub("\\\\", "/", path)
-  path <- gsub("//", "/", path)
+  # WSL cmdstan path is a network path and needs the leading //
+  path <- gsub("//(?!wsl)", "/", path, perl = TRUE)
   if (endsWith(path, "/")) {
     # remove trailing "/"
     path <- substr(path, 1, nchar(path) - 1)
@@ -102,7 +114,7 @@ repair_path <- function(path) {
 #' @return If `path` is `NULL` then `".exe"` on Windows and `""` otherwise. If
 #'   `path` is not `NULL` then `.exe` is added as the extension on Windows.
 cmdstan_ext <- function(path = NULL) {
-  ext <- if (os_is_windows()) ".exe" else ""
+  ext <- if (os_is_windows() && !os_is_wsl()) ".exe" else ""
   if (is.null(path)) {
     return(ext)
   }
@@ -131,8 +143,6 @@ strip_ext <- function(file) {
 }
 absolute_path <- Vectorize(.absolute_path, USE.NAMES = FALSE)
 
-
-
 # read, write, and copy files --------------------------------------------
 
 #' Copy temporary files (e.g., output, data) to a different location
@@ -158,7 +168,7 @@ copy_temp_files <-
            timestamp = TRUE,
            random = TRUE,
            ext = ".csv") {
-    checkmate::assert_directory_exists(new_dir, access = "w")
+    assert_dir_exists(new_dir, access = "w")
     destinations <- generate_file_names(
       basename = new_basename,
       ext = ext,
@@ -191,7 +201,7 @@ generate_file_names <-
            random = TRUE) {
     new_names <- basename
     if (timestamp) {
-      stamp <- format(Sys.time(), "%Y%m%d%H%M")
+      stamp <- base::format(Sys.time(), "%Y%m%d%H%M")
       new_names <- paste0(new_names, "-", stamp)
     }
     if (!is.null(ids)) {
@@ -199,7 +209,7 @@ generate_file_names <-
     }
     if (random) {
       rand_num_pid <- as.integer(stats::runif(1, min = 0, max = 1E7)) + Sys.getpid()
-      rand <- format(as.hexmode(rand_num_pid), width = 6)
+      rand <- base::format(as.hexmode(rand_num_pid), width = 6)
       new_names <- paste0(new_names, "-", rand)
     }
 
@@ -237,47 +247,114 @@ set_num_threads <- function(num_threads) {
 }
 
 
-# convergence checks ------------------------------------------------------
+# hmc diagnostics ------------------------------------------------------
 check_divergences <- function(post_warmup_sampler_diagnostics) {
+  num_divergences_per_chain <- NULL
   if (!is.null(post_warmup_sampler_diagnostics)) {
     divergences <- posterior::extract_variable_matrix(post_warmup_sampler_diagnostics, "divergent__")
-    num_of_draws <- length(divergences)
-    num_of_divergences <- sum(divergences)
-    if (!is.na(num_of_divergences) && num_of_divergences > 0) {
-      percentage_divergences <- 100 * num_of_divergences / num_of_draws
+    num_divergences_per_chain <- colSums(divergences)
+    num_divergences <- sum(num_divergences_per_chain)
+    num_draws <- length(divergences)
+    if (!is.na(num_divergences) && num_divergences > 0) {
+      percentage_divergences <- 100 * num_divergences / num_draws
       message(
-        "\nWarning: ", num_of_divergences, " of ", num_of_draws,
-        " (", (format(round(percentage_divergences, 0), nsmall = 1)), "%)",
+        "Warning: ", num_divergences, " of ", num_draws,
+        " (", (base::format(round(percentage_divergences, 0), nsmall = 1)), "%)",
         " transitions ended with a divergence.\n",
-        "This may indicate insufficient exploration of the posterior distribution.\n",
-        "Possible remedies include: \n",
-        "  * Increasing adapt_delta closer to 1 (default is 0.8) \n",
-        "  * Reparameterizing the model (e.g. using a non-centered parameterization)\n",
-        "  * Using informative or weakly informative prior distributions \n"
+        "See https://mc-stan.org/misc/warnings for details.\n"
       )
     }
   }
+  invisible(unname(num_divergences_per_chain))
 }
 
-check_sampler_transitions_treedepth <- function(post_warmup_sampler_diagnostics, metadata) {
+check_max_treedepth <- function(post_warmup_sampler_diagnostics, metadata) {
+  num_max_treedepths_per_chain <- NULL
   if (!is.null(post_warmup_sampler_diagnostics)) {
-    treedepth <- posterior::extract_variable_matrix(post_warmup_sampler_diagnostics, "treedepth__")
-    num_of_draws <- length(treedepth)
-    max_treedepth_hit <- sum(treedepth >= metadata$max_treedepth)
-    if (!is.na(max_treedepth_hit) && max_treedepth_hit > 0) {
-      percentage_max_treedepth <- 100 * max_treedepth_hit / num_of_draws
+    treedepths <- posterior::extract_variable_matrix(post_warmup_sampler_diagnostics, "treedepth__")
+    num_max_treedepths_per_chain <- apply(treedepths, 2, function(x) sum(x >= metadata$max_treedepth))
+    num_max_treedepths <- sum(num_max_treedepths_per_chain)
+    num_draws <- length(treedepths)
+    if (!is.na(num_max_treedepths) && num_max_treedepths > 0) {
+      percentage_max_treedepths <- 100 * num_max_treedepths / num_draws
       message(
-        max_treedepth_hit, " of ", num_of_draws, " (", (format(round(percentage_max_treedepth, 0), nsmall = 1)), "%)",
-        " transitions hit the maximum treedepth limit of ", metadata$max_treedepth,
-        " or 2^", metadata$max_treedepth, "-1 leapfrog steps.\n",
-        "Trajectories that are prematurely terminated due to this limit will result in slow exploration.\n",
-        "Increasing the max_treedepth limit can avoid this at the expense of more computation.\n",
-        "If increasing max_treedepth does not remove warnings, try to reparameterize the model.\n"
+        "Warning: ", num_max_treedepths, " of ", num_draws, " (", (base::format(round(percentage_max_treedepths, 0), nsmall = 1)), "%)",
+        " transitions hit the maximum treedepth limit of ", metadata$max_treedepth,".\n",
+        "See https://mc-stan.org/misc/warnings for details.\n"
       )
     }
   }
+  invisible(unname(num_max_treedepths_per_chain))
 }
 
+ebfmi <- function(post_warmup_sampler_diagnostics) {
+  efbmi_per_chain <- NULL
+  if (!is.null(post_warmup_sampler_diagnostics)) {
+    if (!("energy__" %in% posterior::variables(post_warmup_sampler_diagnostics))) {
+      warning("E-BFMI not computed because the 'energy__' diagnostic could not be located.", call. = FALSE)
+    } else if (posterior::niterations(post_warmup_sampler_diagnostics) < 3) {
+      warning("E-BFMI not computed because it is undefined for posterior chains of length less than 3.", call. = FALSE)
+    } else {
+      energy <- posterior::extract_variable_matrix(post_warmup_sampler_diagnostics, "energy__")
+      if (any(is.na(energy))) {
+        warning("E-BFMI not computed because 'energy__' contains NAs.", call. = FALSE)
+      } else {
+        efbmi_per_chain <- apply(energy, 2, function(x) {
+          (sum(diff(x)^2) / length(x)) / stats::var(x)
+        })
+      }
+    }
+  }
+  efbmi_per_chain
+}
+
+check_ebfmi <- function(post_warmup_sampler_diagnostics, threshold = 0.2) {
+  efbmi_per_chain <- ebfmi(post_warmup_sampler_diagnostics)
+  nan_efbmi_count <- sum(is.nan(efbmi_per_chain))
+  efbmi_below_threshold <- sum(efbmi_per_chain < threshold)
+  if (nan_efbmi_count > 0) {
+    message(
+      "Warning: ", nan_efbmi_count, " of ", length(efbmi_per_chain),
+      " chains have a NaN E-BFMI.\n",
+      "See https://mc-stan.org/misc/warnings for details.\n"
+    )
+  } else if (efbmi_below_threshold > 0) {
+    message(
+      "Warning: ", efbmi_below_threshold, " of ", length(efbmi_per_chain),
+      " chains had an E-BFMI less than ", threshold, ".\n",
+      "See https://mc-stan.org/misc/warnings for details.\n"
+    )
+  }
+  invisible(unname(efbmi_per_chain))
+}
+
+# used in various places (e.g., fit$diagnostic_summary() and validate_sample_args())
+# to validate the selected diagnostics
+available_hmc_diagnostics <- function() {
+  c("divergences", "treedepth", "ebfmi")
+}
+
+# in some places we need to convert user friendly names
+# to the names used in the sampler diagnostics files:
+#   * ebfmi --> energy__
+#   * divergences --> divergent__
+#   * treedepth --> treedepth__
+convert_hmc_diagnostic_names <- function(diagnostics) {
+  diagnostic_names <- c()
+  if ("divergences" %in% diagnostics) {
+    diagnostic_names <- c(diagnostic_names, "divergent__")
+  }
+  if ("treedepth" %in% diagnostics) {
+    diagnostic_names <- c(diagnostic_names, "treedepth__")
+  }
+  if ("ebfmi" %in% diagnostics) {
+    diagnostic_names <- c(diagnostic_names, "energy__")
+  }
+  if (length(diagnostic_names) == 0) {
+    diagnostic_names <- ""
+  }
+  diagnostic_names
+}
 
 # draws formatting --------------------------------------------------------
 
@@ -297,12 +374,19 @@ as_draws_format_fun <- function(draws_format) {
 }
 
 assert_valid_draws_format <- function(format) {
-  if (!is.null(format) &&
-      !format %in% valid_draws_formats()) {
-    stop(
-      "The supplied draws format is not valid. ",
-      call. = FALSE
-    )
+  if (!is.null(format)) {
+    if (!format %in% valid_draws_formats()) {
+      stop(
+        "The supplied draws format is not valid. ",
+        call. = FALSE
+      )
+    }
+    if (format %in% c("rvars", "draws_rvars")) {
+      stop(
+        "\nWe are fixing a bug in fit$draws(format = 'draws_rvars').",
+        "\nFor now please use posterior::as_draws_rvars(fit$draws()) instead."
+      )
+    }
   }
   invisible(format)
 }
@@ -371,4 +455,437 @@ as_mcmc.list <- function(x) {
   })
   class(mcmc_list) <- 'mcmc.list'
   return(mcmc_list)
+}
+
+# WSL-related helper functions ------------------------------------------
+
+# When providing the model path to WSL, it needs to be in reference to the
+# to Windows mount point (/mnt/drive-letter) within the WSL install:
+# e.g., C:/Users/... -> /mnt/c/Users/...
+wsl_safe_path <- function(path = NULL, revert = FALSE) {
+  if (!is.character(path) || is.null(path) || !os_is_wsl()) {
+    return(path)
+  }
+  if (revert) {
+    if (!grepl("^/mnt/", path)) {
+      return(path)
+    }
+    strip_mnt <- gsub("^/mnt/", "", path)
+    drive_letter <- strtrim(strip_mnt, 1)
+    path <- gsub(paste0("^/mnt/", drive_letter),
+                  paste0(toupper(drive_letter), ":"),
+                  path)
+  } else if (grepl("^//wsl", path)) {
+    path <- gsub(wsl_dir_prefix(), "", path, fixed = TRUE)
+  } else {
+    path_already_safe <- grepl("^/mnt/", path)
+    if (os_is_wsl() && !isTRUE(path_already_safe) && !is.na(path)) {
+      base_file <- basename(path)
+      path <- dirname(path)
+      abs_path <- repair_path(utils::shortPathName(path))
+      drive_letter <- tolower(strtrim(abs_path, 1))
+      path <- gsub(paste0(drive_letter, ":"),
+                  paste0("/mnt/", drive_letter),
+                  abs_path,
+                  ignore.case = TRUE)
+      path <- paste0(path, "/", base_file)
+    }
+  }
+  path
+}
+
+# Running commands through WSL requires using 'wsl' as the command with the
+# intended command (e.g., stanc) as the first argument. This function acts as
+# a wrapper around processx::run() to apply this change where necessary, and
+# forward all other arguments
+wsl_compatible_run <- function(...) {
+  run_args <- list(...)
+  if (os_is_wsl()) {
+    command <- run_args$command
+    run_args$command <- "wsl"
+    if (!is.null(run_args$wd)) {
+      wd <- wsl_safe_path(run_args$wd)
+      run_args$wd <- NULL
+      run_args$args <- c(c("cd", wd, "&&"), command, run_args$args)
+    } else {
+      run_args$args <- c(command, run_args$args)
+    }
+  }
+  do.call(processx::run, run_args)
+}
+
+wsl_compatible_process_new <- function(...) {
+  run_args <- list(...)
+  if (os_is_wsl()) {
+    command <- run_args$command
+    run_args$command <- "wsl"
+    if (!is.null(run_args$wd)) {
+      wd <- wsl_safe_path(run_args$wd)
+      run_args$wd <- NULL
+      run_args$args <- c(c("cd", wd, "&&"), command, run_args$args)
+    } else {
+      run_args$args <- c(command, run_args$args)
+    }
+  }
+  do.call(processx::process$new, run_args)
+}
+
+wsl_installed <- function() {
+  tryCatch({
+    # Call can hang indefinitely on Github actions, so explicitly kill
+    p <- processx::process$new("wsl", "uname")
+    Sys.sleep(1)
+    if (p$is_alive()) {
+      p$kill()
+      FALSE
+    } else {
+      status <- p$get_exit_status()
+      if (is.null(status)) {
+        FALSE
+      }
+      isTRUE(status == 0)
+    }
+  }, error = function(e) { FALSE }, finally = function(ret) { ret })
+}
+
+wsl_distro_name <- function() {
+  name <- processx::run(
+    command = "wsl",
+    args = c("echo", "$WSL_DISTRO_NAME")
+  )$stdout
+  gsub("\n", "", name, fixed = TRUE)
+}
+
+wsl_home_dir <- function() {
+  dir <- processx::run(
+        command = "wsl",
+        args = c("echo", "$HOME")
+  )$stdout
+  gsub("\n", "", dir, fixed = TRUE)
+}
+
+wsl_dir_prefix <- function(wsl = FALSE) {
+  if (os_is_wsl() || wsl) {
+    paste0("//wsl$/", wsl_distro_name())
+  } else {
+    ""
+  }
+}
+
+wsl_tempdir <- function() {
+  dir <- processx::run(command = "wsl",
+                        args = c("mktemp", "-d"))$stdout
+  gsub("\n", "", dir, fixed = TRUE)
+}
+
+# The checkmate file and directory assertion functions don't register the WSL
+# network path as legitimate, and will always error. To avoid this we create a
+# new checking functions with WSL handling, and then pass these to
+# checkmate::makeAssertionFunction to replicate the existing assertion functionality
+check_dir_exists <- function(dir, access = NULL) {
+  if (os_is_wsl()) {
+    if (!checkmate::qtest(dir, "S+")) {
+      return("No directory provided.")
+    }
+    checks <- sapply(dir, .wsl_check_exists, is_dir = TRUE, access = access)
+    if (any(as.character(checks) != "TRUE")) {
+      grep("TRUE", checks, value = TRUE, invert = TRUE)[1]
+    } else {
+      TRUE
+    }
+  } else {
+    checkmate::checkDirectoryExists(dir, access = access)
+  }
+}
+
+check_file_exists <- function(files, access = NULL, ...) {
+  if (os_is_wsl()) {
+    if (!checkmate::qtest(files, "S+")) {
+      return("No file provided.")
+    }
+    checks <- sapply(files, .wsl_check_exists, is_dir = FALSE, access = access)
+    if (any(as.character(checks) != "TRUE")) {
+      grep("TRUE", checks, value = TRUE, invert = TRUE)[1]
+    } else {
+      TRUE
+    }
+  } else {
+    checkmate::checkFileExists(files, access = access, ...)
+  }
+}
+
+.wsl_check_exists <- function(path, is_dir = TRUE, access = NULL) {
+  path_check <- processx::run(
+    command = "wsl",
+    args = c("ls", "-la", wsl_safe_path(path)),
+    error_on_status = FALSE
+  )
+
+  if (path_check$status != 0) {
+    path <- gsub("^./", "", path)
+    err <- ifelse(is_dir,
+                  paste0("Directory '", path, "' does not exist"),
+                  paste0("File does not exist: '", path, "'"))
+    return(err)
+  }
+
+  path_metadata <- strsplit(path_check$stdout, split = "\n",
+                            fixed = TRUE)[[1]]
+
+  wsl_user <- processx::run(
+    command = "wsl",
+    args = c("echo", "$USER"),
+    error_on_status = FALSE
+  )$stdout
+  wsl_user <- gsub("\n", "", wsl_user, fixed = TRUE)
+
+  path_metadata <- grep(wsl_user, path_metadata, value = TRUE)
+
+  if (!is.null(access)) {
+    path_permissions <- strsplit(path_metadata, " ", fixed = TRUE)[[1]][1]
+    if (!any(grepl(access, path_permissions))) {
+      name <- ifelse(is_dir, "directory", "file")
+      return(paste0("Specified ", name, ": ", path,
+                    " does not have access permission ", access))
+    }
+  }
+  TRUE
+}
+
+assert_dir_exists <- checkmate::makeAssertionFunction(check_dir_exists)
+assert_file_exists <- checkmate::makeAssertionFunction(check_file_exists)
+
+# Model methods & expose_functions helpers ------------------------------------------------------
+get_cmdstan_flags <- function(flag_name) {
+  cmdstan_path <- cmdstanr::cmdstan_path()
+  flags <- wsl_compatible_run(
+    command = "make",
+    args = c(paste0("print-", flag_name)),
+    wd = cmdstan_path
+  )$stdout
+
+  flags <- gsub("\n", "", flags, fixed = TRUE)
+
+  flags <- gsub(
+    pattern = paste0(flag_name, "\\s(=|\\+=)(\\s|$)"),
+    replacement = "", x = flags
+  )
+
+  if (flags == "") {
+    return(flags)
+  }
+
+  if (flag_name == "STANCFLAGS") {
+    # StanC flags need to be returned as a character vector
+    flags_vec <- strsplit(x = flags, split = " ", fixed = TRUE)[[1]]
+    return(flags_vec)
+  }
+
+  if (flag_name %in% c("LDLIBS", "LDFLAGS_TBB")) {
+    # shQuote -L paths and rpaths
+    # The LDLIBS flags change paths to /c/ instead of C:/, need to revert to
+    # format consistent with path on windows
+    if (.Platform$OS.type == "windows") {
+      flags <- gsub("(-L|-rpath),/([a-zA-Z])/", "\\1,\\2:/", flags, perl = TRUE)
+    }
+    flags <- gsub(cmdstan_path, "", flags, ignore.case = TRUE)
+    flags <- gsub("(-L,|-rpath,)/stan/lib/stan_math/lib/tbb",
+                  paste0("\\1", shQuote(paste0(cmdstan_path, "/stan/lib/stan_math/lib/tbb"))),
+                  flags)
+    return(flags)
+  }
+
+  # shQuote include paths
+  flags <- gsub("-I ", "-I", flags, fixed = TRUE)
+  flags <- strsplit(flags, " ", fixed = TRUE)[[1]]
+  include_flags <- grep("^-I", flags)
+  flags <- gsub("^-I", paste0(cmdstan_path, "/"), flags)
+  flags[include_flags] <- paste0("-I", shQuote(flags[include_flags]))
+  flags <- paste(flags, collapse = " ")
+
+  # shQuote Remaining " stan/" paths
+  flags <- strsplit(flags, split = " ", fixed = TRUE)[[1]]
+  oth_stan_flags <- grep("^stan/", flags)
+  flags[oth_stan_flags] <- shQuote(paste0(cmdstan_path, "/", flags[oth_stan_flags]))
+  paste(flags, collapse = " ")
+}
+
+rcpp_source_stan <- function(code, env, verbose = FALSE) {
+  cxxflags <- get_cmdstan_flags("CXXFLAGS")
+  libs <- c("LDLIBS", "LIBSUNDIALS", "TBB_TARGETS", "LDFLAGS_TBB")
+  libs <- paste(sapply(libs, get_cmdstan_flags), collapse = " ")
+  if (.Platform$OS.type == "windows") {
+    libs <- paste(libs, "-fopenmp")
+  }
+  lib_paths <- c("/stan/lib/stan_math/lib/tbb/",
+                 "/stan/lib/stan_math/lib/sundials_6.1.1/lib/")
+  withr::with_path(paste0(cmdstan_path(), lib_paths),
+    withr::with_makevars(
+      c(
+        USE_CXX14 = 1,
+        PKG_CPPFLAGS = ifelse(cmdstan_version() <= "2.30.1", "-DCMDSTAN_JSON", ""),
+        PKG_CXXFLAGS = cxxflags,
+        PKG_LIBS = libs
+      ),
+      Rcpp::sourceCpp(code = code, env = env, verbose = verbose)
+    )
+  )
+  invisible(NULL)
+}
+
+expose_model_methods <- function(env, verbose = FALSE, hessian = FALSE) {
+  code <- c(env$hpp_code_,
+            readLines(system.file("include", "model_methods.cpp",
+                                  package = "cmdstanr", mustWork = TRUE)))
+
+  if (hessian) {
+    code <- c(code,
+            readLines(system.file("include", "hessian.cpp",
+                                  package = "cmdstanr", mustWork = TRUE)))
+  }
+
+  code <- paste(code, collapse = "\n")
+  rcpp_source_stan(code, env, verbose)
+  invisible(NULL)
+}
+
+initialize_model_pointer <- function(env, data, seed = 0) {
+  ptr_and_rng <- env$model_ptr(data, seed)
+  env$model_ptr_ <- ptr_and_rng$model_ptr
+  env$model_rng_ <- ptr_and_rng$base_rng
+  env$num_upars_ <- env$get_num_upars(env$model_ptr_)
+  env$param_metadata_ <- env$get_param_metadata(env$model_ptr_)
+  invisible(NULL)
+}
+
+create_skeleton <- function(param_metadata, model_variables,
+                            transformed_parameters, generated_quantities) {
+  target_params <- names(model_variables$parameters)
+  if (transformed_parameters) {
+    target_params <- c(target_params,
+                       names(model_variables$transformed_parameters))
+  }
+  if (generated_quantities) {
+    target_params <- c(target_params,
+                       names(model_variables$generated_quantities))
+  }
+  lapply(param_metadata[target_params], function(par_dims) {
+    array(0, dim = ifelse(length(par_dims) == 0, 1, par_dims))
+  })
+}
+
+get_standalone_hpp <- function(stan_file, stancflags) {
+  status <- withr::with_path(
+      c(
+        toolchain_PATH_env_var(),
+        tbb_path()
+      ),
+      wsl_compatible_run(
+        command = stanc_cmd(),
+        args = c(stan_file,
+                stancflags),
+        wd = cmdstan_path(),
+        error_on_status = FALSE
+      )
+    )
+  if (status$status == 0) {
+    name <- strip_ext(basename(stan_file))
+    path <- dirname(stan_file)
+    hpp_path <- file.path(path, paste0(name, ".hpp"))
+    hpp <- readLines(hpp_path)
+    unlink(hpp_path)
+    hpp
+  } else {
+    invisible(NULL)
+  }
+}
+
+# Construct the plain return type for a standalone function by
+# looking up the return type of the functor declaration and replacing
+# the template types (i.e., T0__) with double
+get_plain_rtn <- function(fun_body, model_lines) {
+  fun_props <- decor::parse_cpp_function(paste(fun_body[-1], collapse = "\n"))
+  struct_start <- grep(paste0("struct ", fun_props$name, "_functor"), model_lines)
+  struct_op_start <- grep("operator()", model_lines[-(1:struct_start)])[1] + struct_start
+
+  struct_rtn <- grep("nullptr>", model_lines[struct_start:struct_op_start], fixed = TRUE) + struct_start
+
+  rtn_type <- paste0(model_lines[struct_rtn:struct_op_start], collapse = " ")
+  rm_trailing_nullptr <- gsub(".*nullptr>[^,]", "", rtn_type)
+  rm_operator <- gsub("operator().*", "", rtn_type)
+  repl_dbl <- gsub("T[0-9*]__", "double", rm_operator)
+  gsub("(^\\s|\\s$)", "", repl_dbl)
+}
+
+# Prepare the c++ code for a standalone function so that it can be exported to R:
+# - Replace the auto return type with the plain type
+# - Add Rcpp::export attribute
+# - Remove the pstream__ argument and pass Rcpp::Rcout by default
+# - Replace the boost::ecuyer1988& base_rng__ argument with an integer seed argument
+#     that instantiates an RNG
+prep_fun_cpp <- function(fun_body, model_lines) {
+  fun_body <- gsub("auto", get_plain_rtn(fun_body, model_lines), fun_body)
+  fun_body <- gsub("// [[stan::function]]", "// [[Rcpp::export]]", fun_body, fixed = TRUE)
+  fun_body <- gsub("std::ostream* pstream__ = nullptr", "", fun_body, fixed = TRUE)
+  fun_body <- gsub("boost::ecuyer1988& base_rng__", "size_t seed = 0", fun_body, fixed = TRUE)
+  fun_body <- gsub("base_rng__,", "*(new boost::ecuyer1988(seed)),", fun_body, fixed = TRUE)
+  fun_body <- gsub("pstream__", "&Rcpp::Rcout", fun_body, fixed = TRUE)
+  fun_body <- paste(fun_body, collapse = "\n")
+  gsub(pattern = ",\\s*)", replacement = ")", fun_body)
+}
+
+compile_functions <- function(env, verbose = FALSE, global = FALSE) {
+  funs <- grep("// [[stan::function]]", env$hpp_code, fixed = TRUE)
+  funs <- c(funs, length(env$hpp_code))
+
+  stan_funs <- sapply(seq_len(length(funs) - 1), function(ind) {
+    fun_body <- env$hpp_code[funs[ind]:(funs[ind + 1] - 1)]
+    prep_fun_cpp(fun_body, env$hpp_code)
+  })
+
+  env$fun_names <- sapply(stan_funs, function(fun) {
+    decor::parse_cpp_function(fun, is_attribute = TRUE)$name
+  })
+
+  mod_stan_funs <- paste(c(
+    env$hpp_code[1:(funs[1] - 1)],
+    "#include <RcppEigen.h>",
+    "// [[Rcpp::depends(RcppEigen)]]",
+    stan_funs),
+  collapse = "\n")
+  if (global) {
+    rcpp_source_stan(mod_stan_funs, globalenv(), verbose)
+  } else {
+    rcpp_source_stan(mod_stan_funs, env, verbose)
+  }
+  env$compiled <- TRUE
+  invisible(NULL)
+}
+
+expose_functions <- function(function_env, global = FALSE, verbose = FALSE) {
+  if (os_is_wsl()) {
+    stop("Standalone functions are not currently available with ",
+          "WSL CmdStan and will not be compiled",
+          call. = FALSE)
+  }
+  require_suggested_package("Rcpp")
+  require_suggested_package("RcppEigen")
+  require_suggested_package("decor")
+  if (function_env$compiled) {
+    if (!global) {
+      message("Functions already compiled, nothing to do!")
+    } else {
+      message("Functions already compiled, copying to global environment")
+      # Create reference to global environment, avoids NOTE about assigning to global
+      pos <- 1
+      envir <- as.environment(pos)
+      lapply(function_env$fun_names, function(fun_name) {
+        assign(fun_name, get(fun_name, function_env), envir)
+      })
+    }
+  } else {
+    message("Compiling standalone functions...")
+    compile_functions(function_env, verbose, global)
+  }
+  invisible(NULL)
 }
