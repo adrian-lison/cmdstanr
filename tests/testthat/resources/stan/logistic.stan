@@ -1,7 +1,7 @@
 data {
   int<lower=0> N;
   int<lower=0> K;
-  array[N] int<lower=0, upper=1> y;
+  int<lower=0,upper=1> y[N];
   matrix[N, K] X;
 }
 parameters {

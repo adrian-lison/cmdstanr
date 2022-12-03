@@ -25,9 +25,7 @@ variable). The variables for Stan's default MCMC algorithm are
 }
 \description{
 Extract the values of sampler diagnostics for each iteration and
-chain of MCMC. To instead get summaries of these diagnostics and associated
-warning messages use the
-\code{\link[=fit-method-diagnostic_summary]{$diagnostic_summary()}} method.
+chain of MCMC.
 }
 \examples{
 \dontrun{

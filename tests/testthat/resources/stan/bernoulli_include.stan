@@ -3,14 +3,13 @@ functions {
 }
 data {
   int<lower=0> N;
-  array[N] int<lower=0, upper=1> y;
+  int<lower=0,upper=1> y[N];
 }
 parameters {
-  real<lower=0, upper=1> theta;
+  real<lower=0,upper=1> theta;
 }
 model {
-  theta ~ beta(divide_real_by_two(2.0), 1);
-  for (n in 1 : N) {
+  theta ~ beta(divide_real_by_two(2.0),1);
+  for (n in 1:N)
     y[n] ~ bernoulli(theta);
-  }
 }

@@ -14,10 +14,9 @@ make_all_fail <- function(x) {
   all_fail
 }
 
-make_some_fail <- function(x, seed = 0) {
+make_some_fail <- function(x) {
   num_files <- 0
   attempt <- 1
-  set.seed(seed)
   while (num_files == 0 || num_files == 4) {
     utils::capture.output(
       check_some_fail <- x$sample(
@@ -51,9 +50,8 @@ test_that("correct warnings are thrown when all chains fail", {
 })
 
 test_that("correct warnings are thrown when some chains fail", {
-  fit_tmp <- suppressWarnings(make_some_fail(mod, seed = 2022))
   expect_warning(
-     make_some_fail(mod, seed = 2022),
+     fit_tmp <- make_some_fail(mod),
      paste(4 - length(fit_tmp$output_files(include_failed = FALSE)), "chain(s) finished unexpectedly"),
      fixed = TRUE
   )
@@ -182,6 +180,13 @@ test_that("gq chains error on wrong input CSV", {
     expect_message(
       mod$generate_quantities(data = data_list, fitted_params = fit_logistic$output_files()),
       "Mismatch between model and fitted_parameters csv"
+    )
+  )
+  err_msg <- "Mismatch between model and fitted_parameters csv file"
+  suppressWarnings(
+    expect_message(
+      mod$generate_quantities(data = data_list, fitted_params = test_path("resources", "csv", "bernoulli-fail.csv")),
+      err_msg
     )
   )
   expect_warning(

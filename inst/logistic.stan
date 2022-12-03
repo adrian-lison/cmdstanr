@@ -1,7 +1,7 @@
 data {
   int<lower=0> N;
   int<lower=0> K;
-  array[N] int<lower=0, upper=1> y;
+  int<lower=0,upper=1> y[N];
   matrix[N, K] X;
 }
 parameters {
@@ -15,7 +15,5 @@ model {
 }
 generated quantities {
   vector[N] log_lik;
-  for (n in 1 : N) {
-    log_lik[n] = bernoulli_logit_lpmf(y[n] | alpha + X[n] * beta);
-  }
+  for (n in 1:N) log_lik[n] = bernoulli_logit_lpmf(y[n] | alpha + X[n] * beta);
 }
